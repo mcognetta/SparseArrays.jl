@@ -4,12 +4,13 @@ module HigherOrderFns
 
 # This module provides higher order functions specialized for sparse arrays,
 # particularly map[!]/broadcast[!] for SparseVectors and SparseMatrixCSCs at present.
-import Base: map, map!, broadcast, copy, copyto!, _extrema_dims, _extrema_itr
+import Base: map, map!, broadcast, copy, copyto!
 
 using Base: front, tail, to_shape
 using ..SparseArrays: SparseVector, SparseMatrixCSC, AbstractSparseVector, AbstractSparseMatrixCSC,
                       AbstractSparseMatrix, AbstractSparseArray, indtype, nnz, nzrange, spzeros,
-                      SparseVectorUnion, AdjOrTransSparseVectorUnion, nonzeroinds, nonzeros, rowvals, getcolptr, widelength
+                      SparseVectorUnion, AdjOrTransSparseVectorUnion, nonzeroinds, nonzeros,
+                      rowvals, getcolptr, widelength, _iszero, _isnotzero
 using Base.Broadcast: BroadcastStyle, Broadcasted, flatten
 using LinearAlgebra
 
@@ -29,7 +30,6 @@ using LinearAlgebra
 # (11) Define broadcast[!] methods handling combinations of scalars, sparse vectors/matrices,
 #       structured matrices, and one- and two-dimensional Arrays.
 # (12) Define map[!] methods handling combinations of sparse and structured matrices.
-# (13) Define extrema methods optimized for sparse vectors/matrices.
 
 
 # (0) BroadcastStyle rules and convenience types for dispatch
@@ -203,9 +203,6 @@ end
 # helper functions for map[!]/broadcast[!] entry points (and related methods below)
 @inline _sumnnzs(A) = nnz(A)
 @inline _sumnnzs(A, Bs...) = nnz(A) + _sumnnzs(Bs...)
-@inline _iszero(x) = x == 0
-@inline _iszero(x::Number) = Base.iszero(x)
-@inline _iszero(x::AbstractArray) = Base.iszero(x)
 @inline _zeros_eltypes(A) = (zero(eltype(A)),)
 @inline _zeros_eltypes(A, Bs...) = (zero(eltype(A)), _zeros_eltypes(Bs...)...)
 @inline _promote_indtype(A) = indtype(A)
@@ -245,7 +242,7 @@ function _map_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat) where Tf
         setcolptr!(C, j, Ck)
         for Ak in colrange(A, j)
             Cx = f(storedvals(A)[Ak])
-            if !_iszero(Cx)
+            if _isnotzero(Cx)
                 Ck > spaceC && (spaceC = expandstorage!(C, Ck + nnz(A) - (Ak - 1)))
                 storedinds(C)[Ck] = storedinds(A)[Ak]
                 storedvals(C)[Ck] = Cx
@@ -326,7 +323,7 @@ function _map_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::SparseVe
             # cases are equally or more likely than the Ai < Bi and Bi < Ai cases. Hence
             # the ordering of the conditional chain above differs from that in the
             # corresponding broadcast code (below).
-            if !_iszero(Cx)
+            if _isnotzero(Cx)
                 Ck > spaceC && (spaceC = expandstorage!(C, Ck + (nnz(A) - (Ak - 1)) + (nnz(B) - (Bk - 1))))
                 storedinds(C)[Ck] = Ci
                 storedvals(C)[Ck] = Cx
@@ -387,7 +384,7 @@ function _map_zeropres!(f::Tf, C::SparseVecOrMat, As::Vararg{SparseVecOrMat,N}) 
         while activerow < rowsentinel
             vals, ks, rows = _fusedupdate_all(rowsentinel, activerow, rows, ks, stopks, As)
             Cx = f(vals...)
-            if !_iszero(Cx)
+            if _isnotzero(Cx)
                 Ck > spaceC && (spaceC = expandstorage!(C, Int(min(widelength(C), Ck + _sumnnzs(As...) - (sum(ks) - N)))))
                 storedinds(C)[Ck] = activerow
                 storedvals(C)[Ck] = Cx
@@ -478,7 +475,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat) where
             bccolrangejA = numcols(A) == 1 ? colrange(A, 1) : colrange(A, j)
             for Ak in bccolrangejA
                 Cx = f(storedvals(A)[Ak])
-                if !_iszero(Cx)
+                if _isnotzero(Cx)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A)))
                     storedinds(C)[Ck] = storedinds(A)[Ak]
                     storedvals(C)[Ck] = Cx
@@ -497,7 +494,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat) where
             # contains a nonzero value x but f(Ax) is nonetheless zero, so we need store
             # nothing in C's jth column. if to the contrary fofAx is nonzero, then we must
             # densely populate C's jth column with fofAx.
-            if !_iszero(fofAx)
+            if _isnotzero(fofAx)
                 for Ci::indtype(C) in 1:numrows(C)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A)))
                     storedinds(C)[Ck] = Ci
@@ -600,7 +597,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
                 # pattern) the Ai < Bi and Bi < Ai cases are equally or more likely than the
                 # Ai == Bi and termination cases. Hence the ordering of the conditional
                 # chain above differs from that in the corresponding map code.
-                if !_iszero(Cx)
+                if _isnotzero(Cx)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                     storedinds(C)[Ck] = Ci
                     storedvals(C)[Ck] = Cx
@@ -617,7 +614,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
             Ax = Ak < stopAk ? storedvals(A)[Ak] : zero(eltype(A))
             Bx = Bk < stopBk ? storedvals(B)[Bk] : zero(eltype(B))
             Cx = f(Ax, Bx)
-            if !_iszero(Cx)
+            if _isnotzero(Cx)
                 for Ci::indtype(C) in 1:numrows(C)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                     storedinds(C)[Ck] = Ci
@@ -639,7 +636,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
                 # B's jth column without storing every entry in C's jth column
                 while Bk < stopBk
                     Cx = f(Ax, storedvals(B)[Bk])
-                    if !_iszero(Cx)
+                    if _isnotzero(Cx)
                         Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                         storedinds(C)[Ck] = storedinds(B)[Bk]
                         storedvals(C)[Ck] = Cx
@@ -658,7 +655,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
                     else
                         Cx = fvAzB
                     end
-                    if !_iszero(Cx)
+                    if _isnotzero(Cx)
                         Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                         storedinds(C)[Ck] = Ci
                         storedvals(C)[Ck] = Cx
@@ -680,7 +677,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
                 # A's jth column without storing every entry in C's jth column
                 while Ak < stopAk
                     Cx = f(storedvals(A)[Ak], Bx)
-                    if !_iszero(Cx)
+                    if _isnotzero(Cx)
                         Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                         storedinds(C)[Ck] = storedinds(A)[Ak]
                         storedvals(C)[Ck] = Cx
@@ -699,7 +696,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, A::SparseVecOrMat, B::Sp
                     else
                         Cx = fzAvB
                     end
-                    if !_iszero(Cx)
+                    if _isnotzero(Cx)
                         Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), A, B)))
                         storedinds(C)[Ck] = Ci
                         storedvals(C)[Ck] = Cx
@@ -889,7 +886,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, As::Vararg{SparseVecOrMa
             while activerow < rowsentinel
                 args, ks, rows = _fusedupdatebc_all(rowsentinel, activerow, rows, defargs, ks, stopks, As)
                 Cx = f(args...)
-                if !_iszero(Cx)
+                if _isnotzero(Cx)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), As)))
                     storedinds(C)[Ck] = activerow
                     storedvals(C)[Ck] = Cx
@@ -906,7 +903,7 @@ function _broadcast_zeropres!(f::Tf, C::SparseVecOrMat, As::Vararg{SparseVecOrMa
                 else
                     Cx = defaultCx
                 end
-                if !_iszero(Cx)
+                if _isnotzero(Cx)
                     Ck > spaceC && (spaceC = expandstorage!(C, _unchecked_maxnnzbcres(size(C), As)))
                     storedinds(C)[Ck] = Ci
                     storedvals(C)[Ck] = Cx
@@ -1162,61 +1159,5 @@ map(f::Tf, A::SparseOrStructuredMatrix, Bs::Vararg{SparseOrStructuredMatrix,N}) 
     (_checksameshape(A, Bs...); _noshapecheck_map(f, _sparsifystructured(A), map(_sparsifystructured, Bs)...))
 map!(f::Tf, C::AbstractSparseMatrixCSC, A::SparseOrStructuredMatrix, Bs::Vararg{SparseOrStructuredMatrix,N}) where {Tf,N} =
     (_checksameshape(C, A, Bs...); _noshapecheck_map!(f, C, _sparsifystructured(A), map(_sparsifystructured, Bs)...))
-
-
-# (13) extrema methods optimized for sparse vectors/matrices.
-function _extrema_itr(f, A::SparseVecOrMat)
-    M = length(A)
-    iszero(M) && throw(ArgumentError("Sparse array must have at least one element."))
-    N = nnz(A)
-    iszero(N) && return f(zero(eltype(A))), f(zero(eltype(A)))
-    vmin, vmax = _extrema_itr(f, nonzeros(A))
-    if N != M
-        f0 = f(zero(eltype(A)))
-        vmin = min(f0, vmin)
-        vmax = max(f0, vmax)
-    end
-    vmin, vmax
-end
-
-function _extrema_dims(f, x::SparseVector, dims)
-    sz = zeros(1)
-    for d in dims
-        sz[d] = 1
-    end
-    if sz == [1] && !iszero(length(x))
-        return [_extrema_itr(f, x)]
-    end
-    invoke(_extrema_dims, Tuple{Any, AbstractArray, Any}, f, x, dims)
-end
-
-function _extrema_dims(f, A::AbstractSparseMatrix, dims)
-    sz = zeros(2)
-    for d in dims
-        sz[d] = 1
-    end
-    if sz == [1, 0] && !iszero(length(A))
-        T = eltype(A)
-        B = Array{Tuple{T,T}}(undef, 1, size(A, 2))
-        @inbounds for col_idx in 1:size(A, 2)
-            col = @view A[:,col_idx]
-            fx = (nnz(col) == size(A, 1)) ? f(A[1,col_idx]) : f(zero(T))
-            B[col_idx] = (fx, fx)
-            for x in nonzeros(col)
-                fx = f(x)
-                if fx < B[col_idx][1]
-                    B[col_idx] = (fx, B[col_idx][2])
-                elseif fx > B[col_idx][2]
-                    B[col_idx] = (B[col_idx][1], fx)
-                end
-            end
-        end
-        return B
-    end
-    invoke(_extrema_dims, Tuple{Any, AbstractArray, Any}, f, A, dims)
-end
-
-_extrema_dims(f, A::SparseVector, ::Colon) = _extrema_itr(f, A)
-_extrema_dims(f, A::AbstractSparseMatrix, ::Colon) = _extrema_itr(f, A)
 
 end

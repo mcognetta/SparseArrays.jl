@@ -11,6 +11,8 @@ using Base.Sort: Forward
 using LinearAlgebra
 using LinearAlgebra: AdjOrTrans, matprod
 
+
+
 import Base: +, -, *, \, /, &, |, xor, ==, zero
 import LinearAlgebra: mul!, ldiv!, rdiv!, cholesky, adjoint!, diag, eigen, dot,
     issymmetric, istril, istriu, lu, tr, transpose!, tril!, triu!, isbanded,
@@ -27,8 +29,18 @@ using Random: default_rng, AbstractRNG, randsubseq, randsubseq!
 export AbstractSparseArray, AbstractSparseMatrix, AbstractSparseVector,
     SparseMatrixCSC, SparseVector, blockdiag, droptol!, dropzeros!, dropzeros,
     issparse, nonzeros, nzrange, rowvals, sparse, sparsevec, spdiagm,
-    sprand, sprandn, spzeros, nnz, permute, findnz,
+    sprand, sprandn, spzeros, nnz, permute, findnz,  fkeep!, ftranspose!,
     sparse_hcat, sparse_vcat, sparse_hvcat
+
+# helper function needed in sparsematrix, sparsevector and higherorderfns
+# `iszero` and `!iszero` don't guarantee to return a boolean but we need one that does
+# to remove the handle the structure of the array.
+@inline _iszero(x) = iszero(x) === true
+@inline _iszero(x::Number) = Base.iszero(x)
+@inline _iszero(x::AbstractArray) = Base.iszero(x)
+@inline _isnotzero(x) = iszero(x) !== true # like `!iszero(x)`, but handles `x::Missing`
+@inline _isnotzero(x::Number) = !iszero(x)
+@inline _isnotzero(x::AbstractArray) = !iszero(x)
 
 include("abstractsparse.jl")
 include("sparsematrix.jl")
@@ -38,6 +50,30 @@ include("higherorderfns.jl")
 include("linalg.jl")
 include("deprecated.jl")
 
+## Functions to switch to 0-based indexing to call external sparse solvers
+
+# Convert from 1-based to 0-based indices
+function decrement!(A::AbstractArray{T}) where T<:Integer
+    for i in eachindex(A); A[i] -= oneunit(T) end
+    A
+end
+decrement(A::AbstractArray{<:Integer}) = decrement!(copy(A))
+
+# Convert from 0-based to 1-based indices
+function increment!(A::AbstractArray{T}) where T<:Integer
+    for i in eachindex(A); A[i] += oneunit(T) end
+    A
+end
+increment(A::AbstractArray{<:Integer}) = increment!(copy(A))
+
+include("solvers/LibSuiteSparse.jl")
+using .LibSuiteSparse
+
+if Base.USE_GPL_LIBS
+    include("solvers/umfpack.jl")
+    include("solvers/cholmod.jl")
+    include("solvers/spqr.jl")
+end
 
 zero(a::AbstractSparseArray) = spzeros(eltype(a), size(a)...)
 

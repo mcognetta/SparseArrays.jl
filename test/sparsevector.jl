@@ -33,9 +33,12 @@ x1_full[SparseArrays.nonzeroinds(spv_x1)] = nonzeros(spv_x1)
     @test SparseArrays.nonzeroinds(x) == [2, 5, 6]
     @test nonzeros(x) == [1.25, -0.75, 3.5]
     @test count(SparseVector(8, [2, 5, 6], [true,false,true])) == 2
-    y = SparseVector(typemax(Int128), Int128[4], [5])
+    y = SparseVector(8, Int128[4], [5])
     @test y isa SparseVector{Int,Int128}
-    @test @inferred size(y) == (@inferred(length(y)),)
+    @test @inferred size(y) == (@inferred(length(y))::Int128,)
+    y = SparseVector(8, Int8[4], [5.0])
+    @test y isa SparseVector{Float64,Int8}
+    @test @inferred size(y) == (@inferred(length(y))::Int8,)
 end
 
 @testset "isstored" begin
@@ -63,7 +66,7 @@ end
     @test occursin("3.5", string(spv_x1))
 
     # issue #30589
-    @test repr("text/plain", sparse([true])) == "1-element SparseArrays.SparseVector{Bool, $Int} with 1 stored entry:\n  [1]  =  1"
+    @test repr("text/plain", sparse([true])) == "1-element $(SparseArrays.SparseVector){Bool, $Int} with 1 stored entry:\n  [1]  =  1"
 end
 
 ### Comparison helper to ensure exact equality with internal structure
@@ -337,6 +340,10 @@ end
         @test findall(!iszero, xc) == findall(!iszero, fc)
         @test findnz(xc) == ([2, 3, 5], [1.25, 0, -0.75])
     end
+    let Xc = spdiagm(spv_x1)
+        @test all(isempty, findnz(@view Xc[:,1]))
+        @test findnz(@view Xc[:,2]) == ([2], [1.25])
+    end
 end
 ### Array manipulation
 
@@ -548,6 +555,8 @@ end
             densevec = fill(1., N)
             densemat = fill(1., N, 1)
             diagmat = Diagonal(densevec)
+            # inferrability (https://github.com/JuliaSparse/SparseArrays.jl/pull/92)
+            cat_with_constdims(args...) = cat(args...; dims=(1,2))
             # Test that concatenations of pairwise combinations of sparse vectors with dense
             # vectors/matrices, sparse matrices, or special matrices yield sparse arrays
             for othervecormat in (densevec, densemat, spmat)
@@ -561,6 +570,9 @@ end
                 @test issparse(hvcat((2,), othervecormat, spvec))
                 @test issparse(cat(spvec, othervecormat; dims=(1,2)))
                 @test issparse(cat(othervecormat, spvec; dims=(1,2)))
+
+                @test issparse(@inferred cat_with_constdims(spvec, othervecormat))
+                @test issparse(@inferred cat_with_constdims(othervecormat, spvec))
             end
             # The preceding tests should cover multi-way combinations of those types, but for good
             # measure test a few multi-way combinations involving those types
@@ -572,6 +584,9 @@ end
             @test issparse(hvcat((5,), spvec, densemat, diagmat, densevec, spmat))
             @test issparse(cat(densemat, diagmat, spmat, densevec, spvec; dims=(1,2)))
             @test issparse(cat(spvec, diagmat, densevec, spmat, densemat; dims=(1,2)))
+
+            @test issparse(@inferred cat_with_constdims(densemat, diagmat, spmat, densevec, spvec))
+            @test issparse(@inferred cat_with_constdims(spvec, diagmat, densevec, spmat, densemat))
         end
         @testset "vertical concatenation of SparseVectors with different el- and ind-type (#22225)" begin
             spv6464 = SparseVector(0, Int64[], Int64[])
@@ -893,10 +908,28 @@ end
     end
 
     let x = spzeros(Float64, 0)
-        @test_throws ArgumentError minimum(t -> true, x)
-        @test_throws ArgumentError maximum(t -> true, x)
+        @test_throws "reducing over an empty" minimum(t -> true, x)
+        @test_throws "reducing over an empty" maximum(t -> true, x)
         @test_throws ArgumentError findmin(x)
         @test_throws ArgumentError findmax(x)
+    end
+    
+    let v = spzeros(3) #Julia #44978
+        v[1] = 2
+        @test argmin(v) == 2
+        @test argmax(v) == 1
+        v[2] = 2
+        @test argmin(v) == 3
+        v[1] = 0
+        v[2] = 0
+        v[3] = 2
+        @test argmin(v) == 1
+        @test argmax(v) == 3
+    end
+
+    let v = spzeros(3) #Julia #44978
+        v[3] = 2
+        @test argmax(v) == 3
     end
 end
 
@@ -1396,15 +1429,46 @@ mutable struct t20488 end
 @testset "show" begin
     io = IOBuffer()
     show(io, MIME"text/plain"(), sparsevec(Int64[1], [1.0]))
-    @test String(take!(io)) == "1-element SparseArrays.SparseVector{Float64, Int64} with 1 stored entry:\n  [1]  =  1.0"
+    @test String(take!(io)) == "1-element $(SparseArrays.SparseVector){Float64, Int64} with 1 stored entry:\n  [1]  =  1.0"
     show(io, MIME"text/plain"(),  spzeros(Float64, Int64, 2))
-    @test String(take!(io)) == "2-element SparseArrays.SparseVector{Float64, Int64} with 0 stored entries"
+    @test String(take!(io)) == "2-element $(SparseArrays.SparseVector){Float64, Int64} with 0 stored entries"
     show(io, similar(sparsevec(rand(3) .+ 0.1), t20488))
     @test String(take!(io)) == "  [1]  =  #undef\n  [2]  =  #undef\n  [3]  =  #undef"
+    # Test that we don't introduce unnecessary padding for long sparse arrays
+    show(io, MIME"text/plain"(), SparseVector(div(typemax(Int32), 2), Int32[1], Int32[1]))
+    @test String(take!(io)) == "1073741823-element $(SparseArrays.SparseVector){Int32, Int32} with 1 stored entry:\n  [1]  =  1"
 end
 
 @testset "spzeros with index type" begin
     @test typeof(spzeros(Float32, Int16, 3)) == SparseVector{Float32,Int16}
+end
+
+@testset "binary operations on sparse vectors with union eltype" begin
+    A = SparseVector(2, [1,2], Union{Int, Missing}[1, missing])
+    for fun in (+, -, *, min, max)
+        if fun in (+, -)
+            @test collect(skipmissing(Array(fun(A, A)))) == collect(skipmissing(Array(fun(Array(A), Array(A)))))
+        end
+        @test collect(skipmissing(Array(map(fun, A, A)))) == collect(skipmissing(map(fun, Array(A), Array(A))))
+        @test collect(skipmissing(Array(broadcast(fun, A, A)))) == collect(skipmissing(broadcast(fun, Array(A), Array(A))))
+    end
+    b = convert(SparseVector{Union{Float64, Missing}}, sprandn(Float64, 10, 0.2)); b[rand(1:10, 3)] .= missing
+    C = convert(SparseVector{Union{Float64, Missing}}, sprandn(Float64, 10, 0.9)); C[rand(1:10, 3)] .= missing
+    CA = Array(C)
+    D = convert(SparseVector{Union{Float64, Missing}}, spzeros(Float64, 10)); D[rand(1:10, 3)] .= missing
+    E = convert(SparseVector{Union{Float64, Missing}}, spzeros(Float64, 10))
+    for B in (b, C, D, E), fun in (+, -, *, min, max)
+        BA = Array(B)
+        # reverse order for opposite nonzeroinds-structure
+        if fun in (+, -)
+            @test collect(skipmissing(Array(fun(B, C)))) == collect(skipmissing(Array(fun(BA, CA))))
+            @test collect(skipmissing(Array(fun(C, B)))) == collect(skipmissing(Array(fun(CA, BA))))
+        end
+        @test collect(skipmissing(Array(map(fun, B, C)))) == collect(skipmissing(map(fun, BA, CA)))
+        @test collect(skipmissing(Array(map(fun, C, B)))) == collect(skipmissing(map(fun, CA, BA)))
+        @test collect(skipmissing(Array(broadcast(fun, B, C)))) == collect(skipmissing(broadcast(fun, BA, CA)))
+        @test collect(skipmissing(Array(broadcast(fun, C, B)))) == collect(skipmissing(broadcast(fun, CA, BA)))
+    end
 end
 
 @testset "corner cases of broadcast arithmetic operations with scalars (#21515)" begin
